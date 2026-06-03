@@ -1,1 +1,3 @@
-# openchamber-WindowsBuild
+# OpenChamber-WindowsBuild
+
+Auto Build OpenChamber Windows Platform
