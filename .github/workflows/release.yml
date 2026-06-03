@@ -4,6 +4,8 @@ on:
   push:
     tags:
       - 'v*'
+    branches:
+      - main
   workflow_dispatch:
     inputs:
       version:
@@ -15,6 +17,8 @@ on:
         required: false
         default: false
         type: boolean
+  schedule:
+    - cron: '0 0 * * *'
 
 env:
   CARGO_INCREMENTAL: 0
@@ -24,14 +28,47 @@ permissions:
   contents: write
 
 jobs:
+  check-submodule:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          submodules: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check and Update Submodule
+        id: check
+        run: |
+          # 强制将子模块更新到远程最新版本
+          git submodule update --remote --merge
+          
+          # 检查本地是否有代码变动（即子模块指针是否移动）
+          if [ -n "$(git status --porcelain)" ]; then
+            echo "detected=true" >> $GITHUB_OUTPUT
+            git config --local user.email "action@github.com"
+            git config --local user.name "GitHub Action"
+            git add .
+            git commit -m "chore: automated openchamber submodule update"
+            git push
+          else
+            echo "detected=false" >> $GITHUB_OUTPUT
+            echo "No updates found for openchamber submodule."
+          fi
+
   create-release:
+    # 修改：如果是定时触发，这个 job 就不在此刻运行（因为 check-submodule 会推新代码重新触发整体流程）
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     outputs:
       release_id: ${{ steps.create_release.outputs.id }}
       release_upload_url: ${{ steps.create_release.outputs.upload_url }}
       version: ${{ steps.get_version.outputs.version }}
     steps:
+      # 修改：所有 checkout 步骤都加上 submodules: true，确保能正确引用 openchamber 文件夹去构建内容
       - uses: actions/checkout@v6
+        with:
+          submodules: true
 
       - name: Get version
         id: get_version
@@ -41,7 +78,8 @@ jobs:
           elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
             echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
           else
-            echo "version=0.0.0-dev" >> $GITHUB_OUTPUT
+            # 如果是由子模块更新后的 push 触发的，自动生成一个带时间戳的预览版号（可根据需求修改）
+            echo "version=0.0.0-auto-$(date +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
           fi
 
       - name: Extract changelog for release
@@ -52,6 +90,14 @@ jobs:
           const fs = require('fs');
           const version = process.env.VERSION;
           const changelogPath = 'CHANGELOG.md';
+          
+          // 如果是自动触发的非正式 Tag 版本，不强检 CHANGELOG.md 
+          if (version.startsWith('0.0.0-auto-') || version === '0.0.0-dev') {
+            fs.mkdirSync('artifacts', { recursive: true });
+            fs.writeFileSync('artifacts/release-notes.md', 'Automated build triggered by submodule update.\n');
+            process.exit(0);
+          }
+
           if (!fs.existsSync(changelogPath)) {
             throw new Error('CHANGELOG.md not found; add it before releasing.');
           }
@@ -79,10 +125,15 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish-npm:
+    # 修改：如果是定时触发，不运行
+    if: github.event_name != 'schedule'
     needs: create-release
     runs-on: ubuntu-latest
     steps:
+      # 修改：支持子模块
       - uses: actions/checkout@v6
+        with:
+          submodules: true
 
       - name: Setup bun
         uses: oven-sh/setup-bun@v2
@@ -120,6 +171,8 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   build-desktop-electron-windows:
+    # 修改：如果是定时触发，不运行
+    if: github.event_name != 'schedule'
     needs: create-release
     runs-on: windows-latest
     strategy:
@@ -130,7 +183,10 @@ jobs:
             target: x86_64-pc-windows-msvc
             platform: win32-x64
     steps:
+      # 修改：支持子模块
       - uses: actions/checkout@v6
+        with:
+          submodules: true
 
       - name: Setup bun
         uses: oven-sh/setup-bun@v2
@@ -154,9 +210,6 @@ jobs:
       - name: Rebuild native modules
         working-directory: packages/electron
         shell: bash
-        # npmRebuild=false in package.json, so electron-builder won't
-        # recompile native deps on its own — we must rebuild against the
-        # target Electron ABI before packaging.
         run: node ./scripts/rebuild-native.mjs
 
       - name: Build Windows app
@@ -182,10 +235,15 @@ jobs:
           retention-days: 1
 
   combine-electron-manifests:
+    # 修改：如果是定时触发，不运行
+    if: github.event_name != 'schedule'
     needs: [create-release]
     runs-on: ubuntu-latest
     steps:
+      # 修改：支持子模块
       - uses: actions/checkout@v6
+        with:
+          submodules: true
 
       - name: Setup Node.js
         uses: actions/setup-node@v6
@@ -215,6 +273,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   finalize-release:
+    # 修改：如果是定时触发，不运行
+    if: github.event_name != 'schedule'
     needs: [create-release, publish-npm, combine-electron-manifests]
     runs-on: ubuntu-latest
     env:
@@ -239,44 +299,13 @@ jobs:
         run: |
           node - <<'NODE'
           (async () => {
-            const tag = `v${process.env.VERSION}`;
-            const repo = process.env.REPOSITORY;
-            const rawRoleId = (process.env.UPDATE_ROLE_ID || '').trim();
-            const updateRoleId = /^\d+$/.test(rawRoleId) ? rawRoleId : '';
-
-            const releaseRes = await fetch(`https://api.github.com/repos/${repo}/releases/tags/${tag}`, {
-              headers: {
-                Authorization: `Bearer ${process.env.GITHUB_TOKEN}`,
-                Accept: 'application/vnd.github+json',
-              },
-            });
-
-            if (!releaseRes.ok) {
-              const body = await releaseRes.text();
-              throw new Error(`Failed to fetch release ${tag}: ${releaseRes.status} ${body}`);
-            }
-
-            const release = await releaseRes.json();
-            const description = (release.body || `OpenChamber ${tag} released.`).slice(0, 4096);
-            const mention = updateRoleId ? `<@&${updateRoleId}>` : '';
-
             const payload = {
-              username: 'OpenChamber Releases',
-              ...(mention ? { content: mention } : {}),
-              ...(updateRoleId
-                ? {
-                    allowed_mentions: {
-                      roles: [updateRoleId],
-                    },
-                  }
-                : {}),
+              content: process.env.UPDATE_ROLE_ID ? `<@&${process.env.UPDATE_ROLE_ID}>` : undefined,
               embeds: [
                 {
-                  title: release.name || `OpenChamber ${tag}`,
-                  url: release.html_url,
-                  description,
-                  color: 2105893,
-                  footer: { text: 'OpenChamber Changelog' },
+                  title: `OpenChamber v${process.env.VERSION} Has Been Released!`,
+                  url: `https://github.com/${process.env.REPOSITORY}/releases/tag/v${process.env.VERSION}`,
+                  color: 0xff4151,
                 },
               ],
             };
