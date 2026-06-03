@@ -227,7 +227,7 @@ jobs:
 
   finalize-release:
     if: github.event_name != 'schedule'
-    needs: [create-release, publish-npm, combine-electron-manifests]
+    needs: [create-release, combine-electron-manifests]
     runs-on: ubuntu-latest
     env:
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
