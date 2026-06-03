@@ -37,25 +37,23 @@ jobs:
 
       - name: Check and Update Submodule
         run: |
-          # 强制将子模块更新到远程最新版本
+          # 仅在 Actions 虚拟环境中将子模块更新到远程最新版本以供检查
           git submodule update --remote --merge
           
-          # 检查本地是否有代码变动（即子模块指针是否移动）
+          # 检查本地指针是否移动（代表上游是否有更新）
           if [ -n "$(git status --porcelain)" ]; then
-            echo "检测到上游子模块有更新，开始执行全自动发版流..."
+            echo "检测到上游子模块有更新，正在通过 API 为当前应用仓库创建构建 Tag..."
             
-            git config --local user.email "action@github.com"
-            git config --local user.name "GitHub Action"
-            
-            # 提交子模块指针更新到主分支
-            git add .
-            git commit -m "chore: automated openchamber submodule update"
-            git push origin main
-            
-            # 核心变动：不通过 main 触发构建，而是直接生成带时间戳的自动化构建 Tag
+            # 生成自动化构建专属的 Tag 名
             AUTO_TAG="v0.0.0-auto-$(date +'%Y%m%d%H%M')"
-            git tag $AUTO_TAG
-            git push origin $AUTO_TAG
+            
+            # 使用 GitHub 官方 API 允许直接给当前最新提交打上 Tag
+            # 这种方式不会向主分支推送任何普通 commit 文件，且能直接激活后续的 push.tags 流程
+            curl -X POST \
+              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/${{ github.repository }}/git/refs \
+              -d "{\"ref\": \"refs/tags/$AUTO_TAG\", \"sha\": \"$(git rev-parse HEAD)\"}"
           else
             echo "No updates found for openchamber submodule."
           fi
@@ -89,8 +87,8 @@ jobs:
         run: |
           node - <<'NODE'
           const fs = require('fs');
+          const path = require('path');
           const version = process.env.VERSION;
-          const changelogPath = 'CHANGELOG.md';
           
           if (version.includes('-auto-') || version === '0.0.0-dev') {
             fs.mkdirSync('artifacts', { recursive: true });
@@ -98,8 +96,11 @@ jobs:
             process.exit(0);
           }
 
+          // 修改：精确定位到子模块内部的 CHANGELOG.md
+          const changelogPath = path.join('openchamber', 'CHANGELOG.md');
+
           if (!fs.existsSync(changelogPath)) {
-            throw new Error('CHANGELOG.md not found; add it before releasing.');
+            throw new Error(`CHANGELOG.md not found at ${changelogPath}; please ensure it exists in the submodule.`);
           }
           const changelog = fs.readFileSync(changelogPath, 'utf8');
           const sections = changelog.split(/^## /m);
@@ -142,22 +143,17 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      # 修改：在子模块文件夹内进行依赖安装
+      # 修改：使用 --cwd 参数使 bun 指向子模块内部执行，避免直接切换目录带来的路径错乱
       - name: Install dependencies
-        working-directory: openchamber
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --cwd openchamber
 
-      # 修改：在子模块文件夹内进行构建
       - name: Build packages
-        working-directory: openchamber
-        run: bun run build
+        run: bun --cwd openchamber run build
 
-      # 修改：进入子模块内部的 packages/web 目录执行打包
       - name: Create npm tarball
         working-directory: openchamber/packages/web
         run: npm pack
 
-      # 修改：上传子模块路径下的 tarball
       - name: Upload npm tarball to release
         if: ${{ github.event.inputs.dry_run != 'true' }}
         uses: softprops/action-gh-release@v2
@@ -198,12 +194,10 @@ jobs:
         with:
           node-version: '20'
 
-      # 修改：在子模块文件夹内进行依赖安装
+      # 修改：使用 --cwd 指定在本地 ./openchamber 文件夹内拉取依赖
       - name: Install dependencies
-        working-directory: openchamber
-        run: bun install --frozen-lockfile
+        run: bun install --frozen-lockfile --cwd openchamber
 
-      # 修改：进入子模块内部的 packages/electron 运行构建和打包脚本
       - name: Build web assets
         working-directory: openchamber/packages/electron
         run: bun run build:web-assets
@@ -222,7 +216,6 @@ jobs:
         shell: bash
         run: node ./scripts/package.mjs --win --${{ matrix.arch }} --publish=never
 
-      # 修改：文件路径指向子模块内部的 dist 目录
       - name: Upload installer to release
         uses: softprops/action-gh-release@v2
         with:
@@ -233,7 +226,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      # 修改：Artifact 路径指向子模块内部的 dist/latest.yml
       - name: Upload update manifest as artifact
         uses: actions/upload-artifact@v7
         with:
@@ -261,7 +253,7 @@ jobs:
           pattern: latest-yml-*-apple-darwin
           path: artifacts
 
-      # 修改：执行该脚本时，将其环境路径或内部脚本指向子模块对应的位置（如果该脚本也在子模块内，请添加 working-directory）
+      # 修改：运行脚本的目标地址也准确指向本地的子模块目录
       - name: Finalize combined latest-mac.yml
         env:
           LATEST_YML_DIR: ${{ github.workspace }}/artifacts
