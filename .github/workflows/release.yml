@@ -4,8 +4,6 @@ on:
   push:
     tags:
       - 'v*'
-    branches:
-      - main
   workflow_dispatch:
     inputs:
       version:
@@ -38,26 +36,31 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check and Update Submodule
-        id: check
         run: |
           # 强制将子模块更新到远程最新版本
           git submodule update --remote --merge
           
           # 检查本地是否有代码变动（即子模块指针是否移动）
           if [ -n "$(git status --porcelain)" ]; then
-            echo "detected=true" >> $GITHUB_OUTPUT
+            echo "检测到上游子模块有更新，开始执行全自动发版流..."
+            
             git config --local user.email "action@github.com"
             git config --local user.name "GitHub Action"
+            
+            # 提交子模块指针更新到主分支
             git add .
             git commit -m "chore: automated openchamber submodule update"
-            git push
+            git push origin main
+            
+            # 核心变动：不通过 main 触发构建，而是直接生成带时间戳的自动化构建 Tag
+            AUTO_TAG="v0.0.0-auto-$(date +'%Y%m%d%H%M')"
+            git tag $AUTO_TAG
+            git push origin $AUTO_TAG
           else
-            echo "detected=false" >> $GITHUB_OUTPUT
             echo "No updates found for openchamber submodule."
           fi
 
   create-release:
-    # 修改：如果是定时触发，这个 job 就不在此刻运行（因为 check-submodule 会推新代码重新触发整体流程）
     if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     outputs:
@@ -65,7 +68,6 @@ jobs:
       release_upload_url: ${{ steps.create_release.outputs.upload_url }}
       version: ${{ steps.get_version.outputs.version }}
     steps:
-      # 修改：所有 checkout 步骤都加上 submodules: true，确保能正确引用 openchamber 文件夹去构建内容
       - uses: actions/checkout@v6
         with:
           submodules: true
@@ -78,8 +80,7 @@ jobs:
           elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
             echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
           else
-            # 如果是由子模块更新后的 push 触发的，自动生成一个带时间戳的预览版号（可根据需求修改）
-            echo "version=0.0.0-auto-$(date +'%Y%m%d%H%M')" >> $GITHUB_OUTPUT
+            echo "version=0.0.0-dev" >> $GITHUB_OUTPUT
           fi
 
       - name: Extract changelog for release
@@ -91,8 +92,7 @@ jobs:
           const version = process.env.VERSION;
           const changelogPath = 'CHANGELOG.md';
           
-          // 如果是自动触发的非正式 Tag 版本，不强检 CHANGELOG.md 
-          if (version.startsWith('0.0.0-auto-') || version === '0.0.0-dev') {
+          if (version.includes('-auto-') || version === '0.0.0-dev') {
             fs.mkdirSync('artifacts', { recursive: true });
             fs.writeFileSync('artifacts/release-notes.md', 'Automated build triggered by submodule update.\n');
             process.exit(0);
@@ -125,12 +125,10 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   publish-npm:
-    # 修改：如果是定时触发，不运行
     if: github.event_name != 'schedule'
     needs: create-release
     runs-on: ubuntu-latest
     steps:
-      # 修改：支持子模块
       - uses: actions/checkout@v6
         with:
           submodules: true
@@ -144,34 +142,39 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
+      # 修改：在子模块文件夹内进行依赖安装
       - name: Install dependencies
+        working-directory: openchamber
         run: bun install --frozen-lockfile
 
+      # 修改：在子模块文件夹内进行构建
       - name: Build packages
+        working-directory: openchamber
         run: bun run build
 
+      # 修改：进入子模块内部的 packages/web 目录执行打包
       - name: Create npm tarball
-        working-directory: packages/web
+        working-directory: openchamber/packages/web
         run: npm pack
 
+      # 修改：上传子模块路径下的 tarball
       - name: Upload npm tarball to release
         if: ${{ github.event.inputs.dry_run != 'true' }}
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.create-release.outputs.version }}
-          files: packages/web/*.tgz
+          files: openchamber/packages/web/*.tgz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to npm
         if: ${{ github.event.inputs.dry_run != 'true' }}
-        working-directory: packages/web
+        working-directory: openchamber/packages/web
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   build-desktop-electron-windows:
-    # 修改：如果是定时触发，不运行
     if: github.event_name != 'schedule'
     needs: create-release
     runs-on: windows-latest
@@ -183,7 +186,6 @@ jobs:
             target: x86_64-pc-windows-msvc
             platform: win32-x64
     steps:
-      # 修改：支持子模块
       - uses: actions/checkout@v6
         with:
           submodules: true
@@ -196,51 +198,54 @@ jobs:
         with:
           node-version: '20'
 
+      # 修改：在子模块文件夹内进行依赖安装
       - name: Install dependencies
+        working-directory: openchamber
         run: bun install --frozen-lockfile
 
+      # 修改：进入子模块内部的 packages/electron 运行构建和打包脚本
       - name: Build web assets
-        working-directory: packages/electron
+        working-directory: openchamber/packages/electron
         run: bun run build:web-assets
 
       - name: Bundle main process
-        working-directory: packages/electron
+        working-directory: openchamber/packages/electron
         run: bun run bundle:main
 
       - name: Rebuild native modules
-        working-directory: packages/electron
+        working-directory: openchamber/packages/electron
         shell: bash
         run: node ./scripts/rebuild-native.mjs
 
       - name: Build Windows app
-        working-directory: packages/electron
+        working-directory: openchamber/packages/electron
         shell: bash
         run: node ./scripts/package.mjs --win --${{ matrix.arch }} --publish=never
 
+      # 修改：文件路径指向子模块内部的 dist 目录
       - name: Upload installer to release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.create-release.outputs.version }}
           files: |
-            packages/electron/dist/*.exe
-            packages/electron/dist/*.blockmap
+            openchamber/packages/electron/dist/*.exe
+            openchamber/packages/electron/dist/*.blockmap
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
+      # 修改：Artifact 路径指向子模块内部的 dist/latest.yml
       - name: Upload update manifest as artifact
         uses: actions/upload-artifact@v7
         with:
           name: latest-yml-${{ matrix.target }}
-          path: packages/electron/dist/latest.yml
+          path: openchamber/packages/electron/dist/latest.yml
           retention-days: 1
 
   combine-electron-manifests:
-    # 修改：如果是定时触发，不运行
     if: github.event_name != 'schedule'
     needs: [create-release]
     runs-on: ubuntu-latest
     steps:
-      # 修改：支持子模块
       - uses: actions/checkout@v6
         with:
           submodules: true
@@ -256,12 +261,13 @@ jobs:
           pattern: latest-yml-*-apple-darwin
           path: artifacts
 
+      # 修改：执行该脚本时，将其环境路径或内部脚本指向子模块对应的位置（如果该脚本也在子模块内，请添加 working-directory）
       - name: Finalize combined latest-mac.yml
         env:
           LATEST_YML_DIR: ${{ github.workspace }}/artifacts
           GH_REPO: ${{ github.repository }}
           OPENCHAMBER_VERSION: ${{ needs.create-release.outputs.version }}
-        run: node packages/electron/scripts/finalize-latest-yml.mjs
+        run: node openchamber/packages/electron/scripts/finalize-latest-yml.mjs
 
       - name: Upload combined manifests to release
         uses: softprops/action-gh-release@v2
@@ -273,7 +279,6 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   finalize-release:
-    # 修改：如果是定时触发，不运行
     if: github.event_name != 'schedule'
     needs: [create-release, publish-npm, combine-electron-manifests]
     runs-on: ubuntu-latest
