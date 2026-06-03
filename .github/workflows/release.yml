@@ -125,51 +125,6 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-  publish-npm:
-    if: github.event_name != 'schedule'
-    needs: create-release
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          submodules: true
-
-      - name: Setup bun
-        uses: oven-sh/setup-bun@v2
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
-
-      # 修改：使用 --cwd 参数使 bun 指向子模块内部执行，避免直接切换目录带来的路径错乱
-      - name: Install dependencies
-        run: bun install --frozen-lockfile --cwd openchamber
-
-      - name: Build packages
-        run: bun --cwd openchamber run build
-
-      - name: Create npm tarball
-        working-directory: openchamber/packages/web
-        run: npm pack
-
-      - name: Upload npm tarball to release
-        if: ${{ github.event.inputs.dry_run != 'true' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ needs.create-release.outputs.version }}
-          files: openchamber/packages/web/*.tgz
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Publish to npm
-        if: ${{ github.event.inputs.dry_run != 'true' }}
-        working-directory: openchamber/packages/web
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
   build-desktop-electron-windows:
     if: github.event_name != 'schedule'
     needs: create-release
