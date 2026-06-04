@@ -1,3 +1,4 @@
 [submodule "openchamber"]
 	path = openchamber
 	url = https://github.com/openchamber/openchamber
+	branch = main
