@@ -83,27 +83,36 @@ jobs:
           const path = require('path');
           const version = process.env.VERSION;
           
+          fs.mkdirSync('artifacts', { recursive: true });
+
+          // 1. 如果是自动构建或开发版，直接写入默认信息并退出
           if (version.includes('-auto-') || version === '0.0.0-dev') {
-            fs.mkdirSync('artifacts', { recursive: true });
             fs.writeFileSync('artifacts/release-notes.md', 'Automated build triggered by submodule update.\n');
             process.exit(0);
           }
 
-          // 修改：精确定位到子模块内部的 CHANGELOG.md
           const changelogPath = path.join('openchamber', 'CHANGELOG.md');
 
+          // 2. 如果 CHANGELOG.md 文件都不存在
           if (!fs.existsSync(changelogPath)) {
-            throw new Error(`CHANGELOG.md not found at ${changelogPath}; please ensure it exists in the submodule.`);
+            fs.writeFileSync('artifacts/release-notes.md', `Release v${version} (No CHANGELOG.md found in submodule).\n`);
+            process.exit(0);
           }
+          
+          // 3. 尝试解析对应的版本区间
           const changelog = fs.readFileSync(changelogPath, 'utf8');
           const sections = changelog.split(/^## /m);
           const section = sections.find(s => s.startsWith('[' + version + ']'));
+          
           if (!section) {
-            throw new Error('Changelog section [' + version + '] not found. Add a section like "## [' + version + '] - YYYY-MM-DD".');
+            // 💡 关键改动：找不到对应版本时不报错，而是写入一个优雅的兜底通知
+            console.log(`⚠️ Warning: Changelog section [${version}] not found. Using fallback release notes.`);
+            fs.writeFileSync('artifacts/release-notes.md', `Automated release for version v${version}.\n\nSee full changes in the submodule repository.\n`);
+          } else {
+            // 找到了则正常截取
+            const content = ('## ' + section).trim();
+            fs.writeFileSync('artifacts/release-notes.md', content + '\n');
           }
-          const content = ('## ' + section).trim();
-          fs.mkdirSync('artifacts', { recursive: true });
-          fs.writeFileSync('artifacts/release-notes.md', content + '\n');
           NODE
 
       - name: Create GitHub Release
