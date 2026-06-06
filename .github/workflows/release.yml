@@ -35,25 +35,21 @@ jobs:
           submodules: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Check and Update Submodule
+      - name: Force Update Submodule and Create Tag
         run: |
           # 告诉 Git 忽略本地锁定的 Commit，直接去远程拉取子模块配置的默认分支（或main）的最新代码
           git submodule update --remote --merge
           
-          # 检查本地是否有代码变动（如果远程 main 有新代码，这里状态就会发生改变）
-          if [ -n "$(git status --porcelain)" ]; then
-            echo "检测到上游 main 分支有更新，正在创建构建 Tag..."
-            
-            AUTO_TAG="v0.0.0-auto-$(date +'%Y%m%d%H%M')"
-            
-            curl -X POST \
-              -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-              -H "Accept: application/vnd.github+json" \
-              https://api.github.com/repos/${{ github.repository }}/git/refs \
-              -d "{\"ref\": \"refs/tags/$AUTO_TAG\", \"sha\": \"$(git rev-parse HEAD)\"}"
-          else
-            echo "No updates found for openchamber submodule main branch."
-          fi
+          echo "Cron 定时触发：跳过差异检查，直接创建自动构建 Tag..."
+          
+          AUTO_TAG="v0.0.0-auto-$(date +'%Y%m%d%H%M')"
+          
+          # 直接无条件调用 GitHub API 创建 Tag，从而触发 on: push: tags 流程
+          curl -X POST \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            -H "https://api.github.com/repos/${{ github.repository }}/git/refs" \
+            -d "{\"ref\": \"refs/tags/$AUTO_TAG\", \"sha\": \"$(git rev-parse HEAD)\"}"
 
   create-release:
     if: github.event_name != 'schedule'
