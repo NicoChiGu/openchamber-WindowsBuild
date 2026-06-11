@@ -35,21 +35,50 @@ jobs:
           submodules: true
           token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Force Update Submodule and Create Tag
+      - name: Fetch Latest Tag from Upstream and Create Tag
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          # 告诉 Git 忽略本地锁定的 Commit，直接去远程拉取子模块配置的默认分支（或main）的最新代码
+          # 1. 告诉 Git 忽略本地锁定的 Commit，拉取最新的子模块代码
           git submodule update --remote --merge
           
-          echo "Cron 定时触发：跳过差异检查，直接创建自动构建 Tag..."
+          # 2. 核心修改：通过 GitHub API 直接获取 openchamber 仓库最新的 Tag
+          UPSTREAM_TAG=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+            https://api.github.com/repos/openchamber/openchamber/releases/latest \
+            | jq -r '.tag_name')
           
-          AUTO_TAG="v0.0.0-auto-$(date +'%Y%m%d%H%M')"
+          # 兜底：如果 releases 里没获取到，尝试直接拿最新的 git tag
+          if [ "$UPSTREAM_TAG" = "null" ] || [ -z "$UPSTREAM_TAG" ]; then
+            UPSTREAM_TAG=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+              https://api.github.com/repos/openchamber/openchamber/tags \
+              | jq -r '.[0].name')
+          fi
           
-          # 直接无条件调用 GitHub API 创建 Tag，从而触发 on: push: tags 流程
+          if [ -z "$UPSTREAM_TAG" ] || [ "$UPSTREAM_TAG" = "null" ]; then
+            echo "❌ 无法获取 openchamber 的最新 Tag，终止流程。"
+            exit 1
+          fi
+          
+          echo "发现上游最新 Tag: $UPSTREAM_TAG"
+          
+          # 3. 检查当前仓库是否已经存在这个 Tag，避免重复构建
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
+            https://api.github.com/repos/${{ github.repository }}/git/refs/tags/$UPSTREAM_TAG)
+          
+          if [ "$HTTP_STATUS" = "200" ]; then
+            echo "✅ 本仓库已存在 Tag $UPSTREAM_TAG，无需重复发布。"
+            exit 0
+          fi
+          
+          echo "🚀 本仓库缺少该 Tag，正在创建 $UPSTREAM_TAG 以触发构建流程..."
+          
+          # 4. 纠正了原本脚本中写错的 API URL（原脚本中把 -H 写成了 URL 前缀）
           curl -X POST \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Authorization: Bearer $GITHUB_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            -H "https://api.github.com/repos/${{ github.repository }}/git/refs" \
-            -d "{\"ref\": \"refs/tags/$AUTO_TAG\", \"sha\": \"$(git rev-parse HEAD)\"}"
+            "https://api.github.com/repos/${{ github.repository }}/git/refs" \
+            -d "{\"ref\": \"refs/tags/$UPSTREAM_TAG\", \"sha\": \"$(git rev-parse HEAD)\"}"
 
   create-release:
     if: github.event_name != 'schedule'
@@ -69,7 +98,10 @@ jobs:
           if [[ -n "${{ github.event.inputs.version }}" ]]; then
             echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
           elif [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+            # 兼容带有 v 和不带 v 的 Tag 提取
+            TAG_NAME="${GITHUB_REF#refs/tags/}"
+            VERSION_NUM="${TAG_NAME#v}"
+            echo "version=${VERSION_NUM}" >> $GITHUB_OUTPUT
           else
             echo "version=0.0.0-dev" >> $GITHUB_OUTPUT
           fi
@@ -85,7 +117,6 @@ jobs:
           
           fs.mkdirSync('artifacts', { recursive: true });
 
-          // 1. 如果是自动构建或开发版，直接写入默认信息并退出
           if (version.includes('-auto-') || version === '0.0.0-dev') {
             fs.writeFileSync('artifacts/release-notes.md', 'Automated build triggered by submodule update.\n');
             process.exit(0);
@@ -93,23 +124,20 @@ jobs:
 
           const changelogPath = path.join('openchamber', 'CHANGELOG.md');
 
-          // 2. 如果 CHANGELOG.md 文件都不存在
           if (!fs.existsSync(changelogPath)) {
             fs.writeFileSync('artifacts/release-notes.md', `Release v${version} (No CHANGELOG.md found in submodule).\n`);
             process.exit(0);
           }
           
-          // 3. 尝试解析对应的版本区间
           const changelog = fs.readFileSync(changelogPath, 'utf8');
           const sections = changelog.split(/^## /m);
-          const section = sections.find(s => s.startsWith('[' + version + ']'));
+          // 兼容 [0.1.0] 或者 0.1.0 的标题写法
+          const section = sections.find(s => s.startsWith('[' + version + ']') || s.startsWith(version));
           
           if (!section) {
-            // 💡 关键改动：找不到对应版本时不报错，而是写入一个优雅的兜底通知
-            console.log(`⚠️ Warning: Changelog section [${version}] not found. Using fallback release notes.`);
+            console.log(`⚠️ Warning: Changelog section for [${version}] not found. Using fallback release notes.`);
             fs.writeFileSync('artifacts/release-notes.md', `Automated release for version v${version}.\n\nSee full changes in the submodule repository.\n`);
           } else {
-            // 找到了则正常截取
             const content = ('## ' + section).trim();
             fs.writeFileSync('artifacts/release-notes.md', content + '\n');
           }
@@ -151,7 +179,6 @@ jobs:
         with:
           node-version: '20'
 
-      # 修改：使用 --cwd 指定在本地 ./openchamber 文件夹内拉取依赖
       - name: Install dependencies
         run: bun install --frozen-lockfile --cwd openchamber
 
@@ -180,8 +207,8 @@ jobs:
           files: |
             openchamber/packages/electron/dist/*.exe
             openchamber/packages/electron/dist/*.blockmap
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload update manifest as artifact
         uses: actions/upload-artifact@v7
@@ -210,7 +237,6 @@ jobs:
           pattern: latest-yml-*-apple-darwin
           path: artifacts
 
-      # 修改：运行脚本的目标地址也准确指向本地的子模块目录
       - name: Finalize combined latest-mac.yml
         env:
           LATEST_YML_DIR: ${{ github.workspace }}/artifacts
@@ -224,8 +250,8 @@ jobs:
           tag_name: v${{ needs.create-release.outputs.version }}
           files: |
             ${{ runner.temp }}/latest-mac.yml
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   finalize-release:
     if: github.event_name != 'schedule'
