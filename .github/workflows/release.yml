@@ -207,8 +207,6 @@ jobs:
           files: |
             openchamber/packages/electron/dist/*.exe
             openchamber/packages/electron/dist/*.blockmap
-          env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Upload update manifest as artifact
         uses: actions/upload-artifact@v7
