@@ -248,8 +248,6 @@ jobs:
           tag_name: v${{ needs.create-release.outputs.version }}
           files: |
             ${{ runner.temp }}/latest-mac.yml
-          env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   finalize-release:
     if: github.event_name != 'schedule'
